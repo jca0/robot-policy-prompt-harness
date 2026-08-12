@@ -1,159 +1,85 @@
-# RoboLab
+# Robot Policy Prompt Harness
 
-[![Website](https://img.shields.io/badge/Website-RoboLab-blue?logo=googlechrome&logoColor=white)](https://research.nvidia.com/labs/srl/projects/robolab)
-[![arXiv](https://img.shields.io/badge/arXiv-2604.09860-b31b1b?logo=arXiv&logoColor=white)](https://arxiv.org/abs/2604.09860)
+A harness for **VLM-guided dynamic prompting of robot manipulation policies**, built on top of [NVIDIA RoboLab](https://github.com/NVlabs/RoboLab) (Isaac Lab simulation benchmark). Instead of feeding a policy one fixed language instruction for a whole episode, the harness puts a VLM in the loop: it proposes the next subtask from the live camera feed, monitors progress, keeps a running scene memory, and re-prompts the policy at each subtask boundary — while a separate VLM reward model ([TOPReward](https://github.com/jca0/TOPReward)) scores trajectory progress in the background.
 
-**RoboLab** is a task-based evaluation benchmark for robot manipulation policies built on [NVIDIA Isaac Lab](https://github.com/isaac-sim/IsaacLab). It provides 100+ manipulation tasks with automated success detection, a server-client policy architecture, and multi-environment parallel evaluation — designed for reproducible, large-scale benchmarking of generalist robot policies in simulation.
+## How it works
 
-<div align="center">
-  <img src="docs/images/robolab.png" alt="RoboLab Overview" width="800"/>
-</div>
+Each episode runs a closed loop around the policy (default: Pi0.5 via a RoboLab inference client):
 
-## Key Features
+1. **Scene description** — Gemini (`gemini-robotics-er-1.6-preview`) describes the initial scene into a persistent `memory.md`.
+2. **Reactive subtask proposal** — given the goal, the current frame, and the memory doc, the VLM proposes *one* next subtask (`robolab/harness/subtask_manager.py`). There is no up-front plan; the decomposition is re-decided after every subtask.
+3. **Policy execution** — the policy is prompted with the current subtask text on every inference step.
+4. **Completion checking** — every N steps, the VLM compares before/current frames and judges whether the subtask is done (`robolab/harness/progress_monitor.py`).
+5. **Memory writing** — on subtask completion, the VLM writes a scene diff into memory; timed-out subtasks are recorded as failures so they aren't blindly retried (`robolab/harness/memory_manager.py`).
+6. **Live reward tracking** — a background thread scores the trajectory-so-far with TOPReward (Qwen3-VL-235B on AWS Bedrock, P("True") logprob as the reward signal). If a subtask times out but the reward trend is still improving, its deadline is extended (`robolab/harness/live_topreward.py`).
+7. The episode ends when the VLM declares the overall goal achieved.
 
-- **RoboLab-120**: An initial set of 120 brand new benchmark [tasks](robolab/tasks/README.md) spanning pick-and-place, stacking, rearrangement, tool use, and more — each with language instructions and automated success/failure detection via composable predicates.
-- **Bring your own robot**: Tasks are not tied to a specific robot embodiment, so you can plug in any robot compatible with IsaacLab!
-- **Rich Asset Libraries**: See a list of [objects](assets/objects/README.md), [scenes](assets/scenes/README.md), and curated [backgrounds](assets/backgrounds/README.md) — everything you need to create new scenes and new tasks for your own evaluation needs.
-- **AI-Enabled Workflows**: Generate new scenes and tasks **in minutes** using natural language with the [/robolab-scenegen](skills/robolab-scenegen/) and [/robolab-taskgen](skills/robolab-taskgen/) Claude Code skills.
-- **Multi-Environment Parallel Evaluation**: Run multiple episodes in parallel across environments with vectorized conditionals and per-environment termination.
-- **Server-Client Policy Architecture**: Policy models run as standalone servers; RoboLab connects via lightweight inference clients (OpenPI, GR00T, and more).
+### Calibration mode
 
-## Getting Started
+Calibration mode learns *which subtask prompts and orderings actually work* for a task:
 
-Requires [uv](https://docs.astral.sh/uv/getting-started/installation/). Isaac Sim 5.0 and Isaac Lab 2.2.0 are installed automatically via `uv sync`. See [Requirements](#requirements) for hardware.
+- Subtask proposals are sampled at higher temperature (exploration).
+- Each completed subtask prompt is scored by its **TOPReward delta** (reward gained while the prompt was active).
+- Each finished episode records the full subtask **sequence** with its outcome, total reward delta, and step count.
+- Accumulated results persist in `calibration_state.json` across runs, and the top/bottom-k sequences are injected back into the next-subtask prompt as "prefer"/"avoid" strategies — so later episodes exploit what earlier ones learned.
 
-### Installation
+Final rankings are written to `calibration_ranked.json`.
 
-```bash
-git clone https://github.com/NVlabs/RoboLab.git
-cd robolab
-uv venv --python 3.11
-source .venv/bin/activate
-uv sync
-```
+## Repository layout
 
-On first run, Isaac Sim prompts you to accept the NVIDIA Omniverse EULA. Either accept it interactively, or set it once in your shell:
-```bash
-export OMNI_KIT_ACCEPT_EULA=Y
-```
+| Path | What it is |
+| --- | --- |
+| `harness_scripts/` | Entry points and episode runners (this repo's core addition) |
+| `robolab/harness/` | Harness library: subtask manager, progress monitor, memory manager, live TOPReward tracker, prompt templates |
+| `topreward/` | [TOPReward](https://github.com/jca0/TOPReward) submodule (reference implementation; the harness inlines its Bedrock client and doesn't import it at runtime) |
+| `examples/policy/run_dynamic_prompting.py` | Earlier standalone version of the dynamic-prompting runner |
+| `info.md` | Scene → task → instruction table for all evaluation tasks |
+| everything else | Stock RoboLab (tasks, assets, sim infrastructure) — see [docs/ROBOLAB_README.md](docs/ROBOLAB_README.md) |
 
-> **Running without activating the venv**: if you don't `source .venv/bin/activate`, prefix every `python` command with `uv run` (e.g. `uv run python scripts/check_registered_envs.py`).
+## Setup
 
-Verify installation:
-```bash
-python scripts/check_registered_envs.py
-```
-
-### Run without a policy
+Follow the [RoboLab installation](docs/ROBOLAB_README.md) (uv + Isaac Sim 5.0 / Isaac Lab 2.2.0, installed via `uv sync`), then configure credentials:
 
 ```bash
-# Run an empty episode with random actions
-python examples/demo/run_empty.py --headless
-
-# Playback recorded demonstration data
-python examples/demo/run_recorded.py --headless
+# .env in the repo root
+GOOGLE_API_KEY=...        # Gemini, for subtask proposal / completion checks / memory
 ```
 
-### Run with a policy
+TOPReward scoring additionally needs standard AWS credentials with Bedrock access in `us-west-2` (model: `qwen.qwen3-vl-235b-a22b`).
 
-RoboLab uses a **server-client architecture**: your model runs as a standalone server, and RoboLab connects to it via a lightweight inference client. To quickly test RoboLab, try [Pi0-5 via OpenPI](docs/inference.md#openpi-pi0--pi0-fast--pi05).
+Your policy must be running as a RoboLab-compatible inference server (OpenPI, GR00T, etc. — see [docs/inference.md](docs/inference.md)).
 
-Each inference client has its own lightweight Python dependency — e.g. Pi0 / Pi0-fast / Pi05 need `openpi-client`, which is **not** installed by `uv sync`. Install only the client(s) you need; see [docs/inference.md](docs/inference.md) for each backend. For example, to use the Pi0 family:
-```bash
-# Clone the OpenPI repo separately and install its client into the RoboLab venv
-git clone git@github.com:xuningy/openpi.git ../openpi
-uv pip install -e ../openpi/packages/openpi-client
-```
+## Usage
 
-1. Start your policy server in a separate terminal.
-2. Run evaluation:
-   ```bash
-   python examples/policy/run_eval.py --policy pi05 --task BananaInBowlTask --num-envs 12 --headless
-   ```
-3. Analyze results:
-   ```bash
-   python analysis/read_results.py output/<your_run_folder>
-   ```
-
-### Common CLI Options
+All runs go through `harness_scripts/run_eval.py` (cameras and headless mode are forced on):
 
 ```bash
-# Run on specific tasks (these two are good for sanity checking)
-python examples/policy/run_eval.py --policy pi05 --task BananaInBowlTask RubiksCubeAndBananaTask
+# VLM-termination mode: fixed instruction, VLM only decides when the episode is done
+uv run python harness_scripts/run_eval.py --policy pi05
 
-# Run on a tag of tasks
-python examples/policy/run_eval.py --policy pi05 --tag semantics
+# Dynamic subtask decomposition (the full loop described above)
+uv run python harness_scripts/run_eval.py --decomposition --task BlocksInBinTask
 
-# Run 12 parallel episodes per task
-python examples/policy/run_eval.py --policy pi05 --headless --num-envs 12
+# Prompt calibration across repeated runs
+uv run python harness_scripts/run_eval.py --calibrate --num-runs 10 --task BlocksInBinTask
 
-# Enable subtask progress tracking
-python examples/policy/run_eval.py --policy pi05 --headless --enable-subtask
-
-# Resume a previous run (skips completed episodes)
-python examples/policy/run_eval.py --policy pi05 --output-folder-name my_previous_run
+# Bare baseline: policy + video only, no VLM
+uv run python harness_scripts/run_eval_bare.py --task BlocksInBinTask
 ```
 
-## Documentation
+Useful flags: `--policy` (pi0, pi05, gr00t, openvla, …), `--task` (one or more; defaults to the list in `harness_scripts/my_tasks.py`), `--instruction` (override), `--check-every-n-steps` (completion-check cadence, default 45), `--subtask-timeout-steps` (default 300), `--topreward-stride` / `--topreward-interval` (reward sampling), `--calibration-temperature` / `--calibration-context-k`, plus RoboLab's scene variation flags (`--backgrounds`, `--lighting-types`, `--table-materials`, `--camera-variations`).
 
-Full documentation is at **[docs/README.md](docs/README.md)**, covering:
+## Output artifacts
 
-- [Objects](docs/objects.md), [Scenes](docs/scene.md), [Tasks](docs/task.md) — Creating and managing assets and benchmark tasks
-- [Robots](docs/robots.md), [Cameras](docs/camera.md), [Lighting](docs/lighting.md), [Backgrounds](docs/background.md) — Configuring simulation parameters
-- [Environment Registration](docs/environment_registration.md) — Combining tasks with robot/observation/action configs
-- [Inference Clients](docs/inference.md) — Built-in policy clients and server setup (OpenPI, GR00T)
-- [Evaluating a New Policy](docs/policy.md) — Implementing your own inference client
-- [Running Environments](docs/environment_run.md) — CLI reference and evaluation workflows
-- [Analysis and Results](docs/analysis.md) — Summarizing, comparing, and auditing results
-- [Subtask Checking](docs/subtask.md), [Conditionals](docs/task_conditionals.md), [Event Tracking](docs/event_tracking.md) — Advanced task features
+Per episode, under `<output>/<task>/harness_logs/ep<N>/`:
 
-## Example Tasks
+- `memory.md` — the VLM's running scene memory (initial scene, completed subtasks, failures)
+- `subtasks.json` — goal, outcome, and every subtask with status (`succeeded` / `timed_out` / `abandoned`) and steps taken
+- `harness.log` — full harness event log
+- `topreward/` — reward curve plot + JSONL, plus per-subtask reward plots
 
-See the full [Benchmark Task Library](robolab/tasks/README.md) for all 120 tasks.
+Calibration runs additionally produce `calibration_state.json` (persistent, cross-run) and `calibration_ranked.json` (final ranked prompts and sequences).
 
-<div align="center">
-  <img src="docs/images/Make_sure_all_the_white_mugs_are_upright_so_that_the_opening_is_facing_upwards_0_hstack_3X_fps24_width800.gif" alt="Make sure all the white mugs are upright so that the opening is facing upwards" width="800"/>
-  <br><em>"Make sure all the white mugs are upright so that the opening is facing upwards."</em>
-</div>
+## Acknowledgments
 
-<div align="center">
-  <img src="docs/images/Put_all_plastic_bottles_away_in_the_bin_3_hstack_3X_fps24.gif" alt="Put all plastic bottles away in the bin" width="800"/>
-  <br><em>"Put all plastic bottles away in the bin."</em>
-</div>
-
-<div align="center">
-  <img src="docs/images/Put_the_orange_measuring_cup_and_the_blue_measuring_cup_outside_of_the_plate_0_hstack_3X_fps24_width800.gif" alt="Put the orange measuring cup and the blue measuring cup outside of the plate" width="800"/>
-  <br><em>"Put the orange measuring cup and the blue measuring cup outside of the plate."</em>
-</div>
-
-## Requirements
-
-| Dependency | Version |
-|---|---|
-| Isaac Sim | 5.0 |
-| Isaac Lab | 2.2.0 |
-| Python | 3.11 |
-| Linux | Ubuntu 22.04+ |
-
-- **Disk space**: ~8 GB (assets account for ~7 GB)
-- **GPU**: NVIDIA RTX GPU required. Recommend 48GB+ VRAM. See [Isaac Lab's hardware requirements](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html#system-requirements) for recommended GPUs and VRAM.
-- **Speed**: 30 GPU hours / 100 tasks, 1.4 it/s (assuming ~200ms inference step)
-
-## License
-
-The RoboLab framework is released under [CC-BY-NC-4.0](https://creativecommons.org/licenses/by-nc/4.0/).
-
-## Citation
-
-```bibtex
-@misc{yang2026robolab,
-      title={RoboLab: A High-Fidelity Simulation Benchmark for Analysis of Task Generalist Policies},
-      author={Xuning Yang and Rishit Dagli and Alex Zook and Hugo Hadfield and Ankit Goyal and Stan Birchfield and Fabio Ramos and Jonathan Tremblay},
-      year={2026},
-      url={https://arxiv.org/abs/2604.09860},
-}
-```
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for acknowledgements, issues, and how to contribute.
+Built on [RoboLab](https://github.com/NVlabs/RoboLab) by NVIDIA (CC-BY-NC-4.0) — the simulation benchmark, tasks, and assets are theirs; see the [original README](docs/ROBOLAB_README.md). Reward scoring uses [TOPReward](https://github.com/jca0/TOPReward).
