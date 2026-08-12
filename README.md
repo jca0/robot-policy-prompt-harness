@@ -1,6 +1,8 @@
 # Robot Policy Prompt Harness
 
-A harness for **VLM-guided dynamic prompting of robot manipulation policies**, built on top of [NVIDIA RoboLab](https://github.com/NVlabs/RoboLab) (Isaac Lab simulation benchmark). Instead of feeding a policy one fixed language instruction for a whole episode, the harness puts a VLM in the loop: it proposes the next subtask from the live camera feed, monitors progress, keeps a running scene memory, and re-prompts the policy at each subtask boundary — while a separate VLM reward model ([TOPReward](https://github.com/jca0/TOPReward)) scores trajectory progress in the background.
+A harness for **VLM-guided dynamic prompting of robot manipulation policies**, built on top of [NVIDIA RoboLab](https://github.com/NVlabs/RoboLab). Instead of feeding a policy one fixed language instruction for a whole episode, the harness puts a VLM in the loop: it proposes the next subtask from the live camera feed, monitors progress, keeps a running scene memory, and re-prompts the policy at each subtask boundary — while a separate VLM reward model ([TOPReward](https://github.com/jca0/TOPReward)) scores trajectory progress in the background.
+
+The harness is policy-agnostic: it treats the policy as a black box that takes an image observation and a text instruction and returns actions. VLAs like Pi0.5, GR00T, and OpenVLA are the typical case, but anything with an image+text interface works — the harness only ever changes the instruction string it sends.
 
 ## How it works
 
@@ -47,7 +49,7 @@ GOOGLE_API_KEY=...        # Gemini, for subtask proposal / completion checks / m
 
 TOPReward scoring additionally needs standard AWS credentials with Bedrock access in `us-west-2` (model: `qwen.qwen3-vl-235b-a22b`).
 
-Your policy must be running as a RoboLab-compatible inference server (OpenPI, GR00T, etc. — see [docs/inference.md](docs/inference.md)).
+Your policy must be running as a RoboLab-compatible inference server (OpenPI, GR00T, etc. — see [docs/inference.md](docs/inference.md)). Any policy that accepts an image observation and a text instruction can be wrapped this way; it doesn't have to be a VLA.
 
 ## Usage
 
