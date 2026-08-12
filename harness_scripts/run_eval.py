@@ -17,6 +17,7 @@ If --task is omitted, tasks are loaded from harness_scripts/my_tasks.py.
 import argparse
 import cv2  # Must import before isaaclab
 import os
+from pathlib import Path
 import sys
 import traceback
 

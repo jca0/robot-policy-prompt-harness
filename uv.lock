@@ -2192,6 +2192,7 @@ name = "robolab"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "boto3", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "google-genai", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "gymnasium", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "h5py", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -2227,6 +2228,7 @@ analysis = [
 
 [package.metadata]
 requires-dist = [
+    { name = "boto3" },
     { name = "google-genai", specifier = ">=1.0.0,<1.65.0" },
     { name = "gymnasium" },
     { name = "h5py" },
