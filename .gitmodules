@@ -1,3 +1,3 @@
 [submodule "topreward"]
 	path = topreward
-	url = git@github.com:jca0/TOPReward.git
+	url = https://github.com/jca0/TOPReward.git
