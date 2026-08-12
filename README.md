@@ -1,31 +1,33 @@
 # Robot Policy Prompt Harness
 
-A harness for **dynamic prompt optimization of robot manipulation policies**, built on top of [NVIDIA RoboLab](https://github.com/NVlabs/RoboLab). The premise: the language instruction a policy receives is a free variable you can optimize — at runtime and across runs — rather than a fixed label on the task. The harness optimizes it on two timescales:
+A harness for dynamic prompt optimization of robot manipulation policies, built on top of [NVIDIA RoboLab](https://github.com/NVlabs/RoboLab). The language instruction a policy receives is a free variable you can optimize at runtime and across runs rather than a fixed label on the task. The harness optimizes it on two timescales:
 
-- **Within an episode**, a VLM adapts the prompt on the fly: it proposes the next subtask from the live camera feed, monitors progress, keeps a running scene memory, and re-prompts the policy at each subtask boundary while a reward model ([TOPReward](https://github.com/jca0/TOPReward)) scores progress in the background.
-- **Across episodes**, calibration mode treats subtask prompts and their orderings as candidates to be searched: it explores variations, scores each against the reward signal, and feeds the best and worst strategies back into future proposals.
+1. Within an episode, a VLM adapts the prompt on the fly: it proposes the next subtask from the live camera feed, monitors progress, keeps a running scene memory, and re-prompts the policy at each subtask boundary while a reward model ([TOPReward](https://github.com/jca0/TOPReward)) scores progress in the background.
+2. Across episodes, calibration mode treats subtask prompts and their orderings as candidates to be searched: it explores variations, scores each against the reward signal, and feeds the best and worst strategies back into future proposals.
 
-The harness is policy-agnostic: it treats the policy as a black box that takes an image observation and a text instruction and returns actions. VLAs like Pi0.5, GR00T, and OpenVLA are the typical case, but anything with an image+text interface works — the harness only ever changes the instruction string it sends.
+The harness is policy-agnostic: it treats the policy as a black box that takes an image observation and a text instruction and returns actions. This repo specifically deals with Pi0.5 but any policy that takes image + text as input (e.g. [TipTop](https://tiptop-robot.github.io/)) is compatible. The harness only  changes the instruction sent to the policy.
+
+[Overview slides](https://docs.google.com/presentation/d/1vpwnkBvV7dP9FBYWicWIZH8MD_Ls0kbssrsw9ej8GA4/edit?usp=sharing)
 
 ## How it works
 
 Each episode runs a closed loop around the policy (default: Pi0.5 via a RoboLab inference client):
 
-1. **Scene description** — Gemini (`gemini-robotics-er-1.6-preview`) describes the initial scene into a persistent `memory.md`.
-2. **Reactive subtask proposal** — given the goal, the current frame, and the memory doc, the VLM proposes *one* next subtask (`robolab/harness/subtask_manager.py`). There is no up-front plan; the decomposition is re-decided after every subtask.
-3. **Policy execution** — the policy is prompted with the current subtask text on every inference step.
-4. **Completion checking** — every N steps, the VLM compares before/current frames and judges whether the subtask is done (`robolab/harness/progress_monitor.py`).
-5. **Memory writing** — on subtask completion, the VLM writes a scene diff into memory; timed-out subtasks are recorded as failures so they aren't blindly retried (`robolab/harness/memory_manager.py`).
-6. **Live reward tracking** — a background thread scores the trajectory-so-far with TOPReward (Qwen3-VL-235B on AWS Bedrock, P("True") logprob as the reward signal). If a subtask times out but the reward trend is still improving, its deadline is extended (`robolab/harness/live_topreward.py`).
-7. The episode ends when the VLM declares the overall goal achieved.
+1. **Scene description.** Gemini (`gemini-robotics-er-1.6-preview`) describes the initial scene into a persistent `memory.md`.
+2. **Reactive subtask proposal.** Given the goal, the current frame, and the memory doc, the VLM proposes the next subtask (`robolab/harness/subtask_manager.py`). There is no up-front plan and the decomposition is re-decided after every subtask.
+3. **Policy execution.** The policy is prompted with the current subtask text on every inference step.
+4. **Completion checking.** Every N steps, the VLM compares before/current frames and judges whether the subtask is done (`robolab/harness/progress_monitor.py`).
+5. **Memory writing.** On subtask completion, the VLM writes a scene diff into memory. Timed-out subtasks are recorded as failures so they aren't blindly retried (`robolab/harness/memory_manager.py`).
+6. **Live reward tracking.** A background thread scores the trajectory-so-far with TOPReward (Qwen3-VL-235B on AWS Bedrock, P("True") logprob as the reward signal). If a subtask times out but the reward trend is still improving, its deadline is extended (`robolab/harness/live_topreward.py`).
+7. **Termination.** The episode ends when the VLM declares the overall goal achieved.
 
 ### Calibration mode
 
-Calibration mode is the cross-episode half of the optimization: it learns *which subtask prompts and orderings actually work* for a task:
+Calibration mode learns which subtask prompts and orderings actually work for a task.
 
 - Subtask proposals are sampled at higher temperature (exploration).
-- Each completed subtask prompt is scored by its **TOPReward delta** (reward gained while the prompt was active).
-- Each finished episode records the full subtask **sequence** with its outcome, total reward delta, and step count.
+- Each completed subtask prompt is scored by its TOPReward delta (reward gained while the prompt was active).
+- Each finished episode records the full subtask sequence with its outcome, total reward delta, and step count.
 - Accumulated results persist in `calibration_state.json` across runs, and the top/bottom-k sequences are injected back into the next-subtask prompt as "prefer"/"avoid" strategies — so later episodes exploit what earlier ones learned.
 
 Final rankings are written to `calibration_ranked.json`.
@@ -34,12 +36,12 @@ Final rankings are written to `calibration_ranked.json`.
 
 | Path | What it is |
 | --- | --- |
-| `harness_scripts/` | Entry points and episode runners (this repo's core addition) |
+| `harness_scripts/` | Entry points and episode runners |
+| `harness_scripts/run_eval.py` | Main entry point — selects the episode mode via `--decomposition` / `--calibrate` |
+| `harness_scripts/episode_dynamic.py` | Dynamic prompting episode loop: reactive subtask proposal, completion checks, TOPReward-gated timeout extension |
+| `harness_scripts/episode_calibration.py` | Calibration episode loop: calibrated subtask proposal + TOPReward delta scoring |
+| `harness_scripts/prompt_calibration.py` | Calibration state: scored prompts/sequences, persistence, prefer/avoid context injection |
 | `robolab/harness/` | Harness library: subtask manager, progress monitor, memory manager, live TOPReward tracker, prompt templates |
-| `topreward/` | [TOPReward](https://github.com/jca0/TOPReward) submodule (reference implementation; the harness inlines its Bedrock client and doesn't import it at runtime) |
-| `examples/policy/run_dynamic_prompting.py` | Earlier standalone version of the dynamic-prompting runner |
-| `info.md` | Scene → task → instruction table for all evaluation tasks |
-| everything else | Stock RoboLab (tasks, assets, sim infrastructure) — see [docs/ROBOLAB_README.md](docs/ROBOLAB_README.md) |
 
 ## Setup
 
@@ -85,6 +87,3 @@ Per episode, under `<output>/<task>/harness_logs/ep<N>/`:
 
 Calibration runs additionally produce `calibration_state.json` (persistent, cross-run) and `calibration_ranked.json` (final ranked prompts and sequences).
 
-## Acknowledgments
-
-Built on [RoboLab](https://github.com/NVlabs/RoboLab) by NVIDIA (CC-BY-NC-4.0) — the simulation benchmark, tasks, and assets are theirs; see the [original README](docs/ROBOLAB_README.md). Reward scoring uses [TOPReward](https://github.com/jca0/TOPReward).
