@@ -1,6 +1,9 @@
 # Robot Policy Prompt Harness
 
-A harness for **VLM-guided dynamic prompting of robot manipulation policies**, built on top of [NVIDIA RoboLab](https://github.com/NVlabs/RoboLab). Instead of feeding a policy one fixed language instruction for a whole episode, the harness puts a VLM in the loop: it proposes the next subtask from the live camera feed, monitors progress, keeps a running scene memory, and re-prompts the policy at each subtask boundary — while a separate VLM reward model ([TOPReward](https://github.com/jca0/TOPReward)) scores trajectory progress in the background.
+A harness for **dynamic prompt optimization of robot manipulation policies**, built on top of [NVIDIA RoboLab](https://github.com/NVlabs/RoboLab). The premise: the language instruction a policy receives is a free variable you can optimize — at runtime and across runs — rather than a fixed label on the task. The harness optimizes it on two timescales:
+
+- **Within an episode**, a VLM adapts the prompt on the fly: it proposes the next subtask from the live camera feed, monitors progress, keeps a running scene memory, and re-prompts the policy at each subtask boundary while a reward model ([TOPReward](https://github.com/jca0/TOPReward)) scores progress in the background.
+- **Across episodes**, calibration mode treats subtask prompts and their orderings as candidates to be searched: it explores variations, scores each against the reward signal, and feeds the best and worst strategies back into future proposals.
 
 The harness is policy-agnostic: it treats the policy as a black box that takes an image observation and a text instruction and returns actions. VLAs like Pi0.5, GR00T, and OpenVLA are the typical case, but anything with an image+text interface works — the harness only ever changes the instruction string it sends.
 
@@ -18,7 +21,7 @@ Each episode runs a closed loop around the policy (default: Pi0.5 via a RoboLab 
 
 ### Calibration mode
 
-Calibration mode learns *which subtask prompts and orderings actually work* for a task:
+Calibration mode is the cross-episode half of the optimization: it learns *which subtask prompts and orderings actually work* for a task:
 
 - Subtask proposals are sampled at higher temperature (exploration).
 - Each completed subtask prompt is scored by its **TOPReward delta** (reward gained while the prompt was active).
